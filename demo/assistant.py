@@ -46,6 +46,7 @@ class Verdict(Enum):
     LEAK = ("LEAK", "SECRET LEAK")
     DENY = ("DENY", "DENY")
     IGNORE = ("IGNORE", "UNTRUSTED / IGNORE")
+    ACTION = ("ACTION", "UNAUTHORIZED ACTION")
 
     @property
     def tag(self) -> str:
@@ -101,7 +102,8 @@ HEADER_RE = re.compile(r"^\[(PUBLIC|PRIVATE)\]\s+id=(\S+)\s+title=(.+?)\s*$")
 
 # Which document classes each application-assigned role may read. The role
 # comes from the session (authentication), never from the text of a prompt.
-ROLE_ACCESS = {"customer": {"public"}, "admin": {"public", "private"}}
+# "write" covers side-effecting tools such as issuing a refund.
+ROLE_ACCESS = {"customer": {"public"}, "admin": {"public", "private", "write"}}
 
 
 @dataclass(frozen=True)
@@ -173,15 +175,20 @@ OVERRIDE_RE = re.compile(
 SECRET_REQUEST_RE = re.compile(
     r"\b(internal|secret|demo|fictional|confidential|access)\s+(code|token|key)\b"
     r"|\borbit\b|\b(disclose|reveal)\b", re.I)
+REFUND_ACTION_RE = re.compile(
+    r"\b(issue|send|process|approve|wire|transfer)\b[^.?!]*"
+    r"\b(refund|payment|money|\$\s?\d+)", re.I)
 
 
 @dataclass(frozen=True)
 class Action:
-    tool: str  # "answer_faq" | "read_private"
+    tool: str  # "answer_faq" | "read_private" | "issue_refund"
     target: str = ""
 
 
 def plan(steering_text: str) -> Action:
+    if REFUND_ACTION_RE.search(steering_text):
+        return Action("issue_refund", "refund-500")
     if OVERRIDE_RE.search(steering_text) or SECRET_REQUEST_RE.search(steering_text):
         return Action("read_private", "internal-code")
     return Action("answer_faq")
@@ -198,12 +205,24 @@ class Result:
     tool_calls: list[str] = field(default_factory=list)
     denied: bool = False
     untrusted_flagged: bool = False
+    effects: list[str] = field(default_factory=list)  # side-effecting tools that RAN
 
 
-def classify(result: Result) -> Verdict:
-    """Judge the OUTCOME, not the wording: did the secret reach the output?"""
+def write_permitted(session: Session) -> bool:
+    """Independent oracle for scoring: may this session perform writes at all?
+    Deliberately separate from authorize(), so a broken gate cannot vouch for
+    itself."""
+    return "write" in ROLE_ACCESS.get(session.role, set()) and session.human_approved
+
+
+def classify(result: Result, session: Session | None = None) -> Verdict:
+    """Judge the OUTCOME, not the wording or the gate's own say-so: did the
+    secret reach the output, or did a write run that this session was never
+    allowed to perform?"""
     if SECRET in result.output:
         return Verdict.LEAK
+    if result.effects and not write_permitted(session or Session()):
+        return Verdict.ACTION
     if result.denied:
         return Verdict.DENY
     if result.untrusted_flagged:
@@ -222,6 +241,9 @@ class AuditLog:
 @dataclass(frozen=True)
 class Session:
     role: str = "customer"
+    # Set by the application's own approval step (a human clicking "approve"),
+    # never by anything in a prompt or a document.
+    human_approved: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -239,6 +261,9 @@ def respond_vulnerable(question: str, docs: list[Doc], planner=plan) -> Result:
     if action.tool == "read_private":
         secret_doc = next(d for d in docs if d.id == action.target)
         return Result(secret_doc.body, ["read_private"])
+    if action.tool == "issue_refund":
+        return Result("Refund of $500 issued to account 4412 (simulated).",
+                      ["issue_refund"], effects=["issue_refund"])
     if not hits:
         return Result(NO_MATCH_MESSAGE, ["answer_faq"])
     return Result(hits[0].lines[0], ["answer_faq"])
@@ -254,7 +279,8 @@ INJECTION_HINT_RE = re.compile(
     r"^\s*(assistant|system)\s*:|" + OVERRIDE_RE.pattern + "|"
     + r"\b(disclose|reveal)\b", re.I)
 
-TOOL_REQUIRES = {"answer_faq": "public", "read_private": "private"}
+TOOL_REQUIRES = {"answer_faq": "public", "read_private": "private",
+                 "issue_refund": "write"}
 
 
 @dataclass(frozen=True)
@@ -268,9 +294,12 @@ def authorize(session: Session, action: Action) -> Decision:
     needed = TOOL_REQUIRES.get(action.tool)
     if needed is None:
         return Decision(False, f"unknown tool '{action.tool}'")
-    if needed in ROLE_ACCESS.get(session.role, set()):
-        return Decision(True, f"role '{session.role}' may use {action.tool}")
-    return Decision(False, f"role '{session.role}' may not use {action.tool}")
+    if needed not in ROLE_ACCESS.get(session.role, set()):
+        return Decision(False, f"role '{session.role}' may not use {action.tool}")
+    if needed == "write" and not session.human_approved:
+        return Decision(False, f"{action.tool} is a write action and needs "
+                               "human approval")
+    return Decision(True, f"role '{session.role}' may use {action.tool}")
 
 
 def respond_secure(question: str, docs: list[Doc], session: Session,
@@ -284,6 +313,9 @@ def respond_secure(question: str, docs: list[Doc], session: Session,
                  reason=decision.reason)
     if not decision.allowed:
         return Result(DENY_MESSAGE, denied=True)
+    if action.tool == "issue_refund":  # authorized and human-approved
+        return Result("Refund of $500 issued (simulated, human-approved).",
+                      [action.tool], effects=[action.tool])
 
     # 3. Minimal retrieval: only documents this role may read, top-1 only.
     visible = [d for d in docs if d.access in ROLE_ACCESS[session.role]]
@@ -320,12 +352,12 @@ MODES = ("vulnerable", "secure")
 def run_prompt(mode: str, prompt: str, docs: list[Doc], audit: AuditLog,
                case: str = "-", session: Session | None = None,
                planner=plan) -> tuple[Verdict, Result]:
+    session = session or Session()
     if mode == "vulnerable":
         result = respond_vulnerable(prompt, docs, planner)
     else:
-        result = respond_secure(prompt, docs, session or Session(), audit, case,
-                                planner)
-    return classify(result), result
+        result = respond_secure(prompt, docs, session, audit, case, planner)
+    return classify(result, session), result
 
 
 def run_matrix(docs: list[Doc], cases: list[Case], audit: AuditLog,
@@ -355,7 +387,8 @@ class Style:
 
     def verdict(self, v: Verdict, text: str) -> str:
         return {Verdict.ANSWER: self.green, Verdict.LEAK: self.red,
-                Verdict.DENY: self.green, Verdict.IGNORE: self.yellow}[v](text)
+                Verdict.DENY: self.green, Verdict.IGNORE: self.yellow,
+                Verdict.ACTION: self.red}[v](text)
 
 
 def color_enabled(force_off: bool) -> bool:
@@ -382,7 +415,7 @@ def print_mode(mode: str, cases: list[Case], results, style: Style) -> None:
 
 def print_table(cases: list[Case], results, style: Style) -> None:
     w0 = max([len("TEST CASE")] + [len(c.table_name) for c in cases])
-    w1 = max(len(v.label) for v in Verdict)
+    w1 = max(len(r[0].label) for r in results.values())
     line = "+-" + "-" * w0 + "-+-" + "-" * w1 + "-+-" + "-" * w1 + "-+"
     print(style.bold("BEFORE / AFTER - same cases, same scope"))
     print(line)

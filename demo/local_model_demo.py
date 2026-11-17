@@ -10,6 +10,7 @@ machine.
     ollama pull llama3.2:3b
     python demo/local_model_demo.py                      # Ollama, llama3.2:3b
     python demo/local_model_demo.py --model qwen2.5:3b
+    python demo/local_model_demo.py --interactive        # type your own prompts
     python demo/local_model_demo.py --backend openai --base-url http://localhost:1234 --model <name>
 
 What to expect: a real model is probabilistic. In VULNERABLE mode it may or
@@ -124,9 +125,54 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", choices=[c.key for c in a.CASES] + ["all"], default="all")
     p.add_argument("--timeout", type=float, default=120.0, help="seconds per model call")
     p.add_argument("--docs", type=Path, default=a.DEFAULT_DOCS)
+    p.add_argument("--interactive", action="store_true",
+                   help="type your own prompts instead of running the four cases")
     p.add_argument("--audit", action="store_true")
     p.add_argument("--no-color", action="store_true")
     return p
+
+
+def interactive(docs, planner, proposals, modes, style, audit) -> None:
+    """Type prompts; each runs through the chosen mode(s) with the real model."""
+    print("Type a prompt and press Enter. Commands: "
+          ":mode vulnerable|secure|both   :audit   :quit\n")
+    while True:
+        try:
+            line = input(f"[{'+'.join(modes)}]> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line:
+            continue
+        if line in (":quit", ":q", ":exit"):
+            return
+        if line == ":audit":
+            a.print_audit(audit)
+            continue
+        if line.startswith(":mode"):
+            arg = (line.split(maxsplit=1) + [""])[1]
+            if arg in ("vulnerable", "secure"):
+                modes = (arg,)
+            elif arg == "both":
+                modes = a.MODES
+            else:
+                print("usage: :mode vulnerable|secure|both")
+            continue
+        if line.startswith(":"):
+            print("unknown command; try :mode, :audit or :quit")
+            continue
+        for mode in modes:
+            proposals.clear()
+            try:
+                verdict, result = a.run_prompt(mode, line, docs, audit, "live",
+                                               planner=planner)
+            except LocalModelError as exc:
+                print(f"error: {exc}")
+                break
+            print(style.bold(f"[{mode}]"))
+            print(style.dim(f"  model proposed: {proposals[-1] if proposals else '-'}"))
+            print(style.verdict(verdict, f"{verdict.tag} {result.output}"))
+        print()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -149,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(style.dim(f"LOCAL MODEL: {args.model} via {args.backend} at {base_url} | "
                     "real model as planner | fictional data | localhost only") + "\n")
+    if args.interactive:
+        interactive(docs, planner, proposals, modes, style, audit)
+        return 0
     try:
         for mode in modes:
             print(style.bold("MODE: VULNERABLE (real model, no authorization)"
