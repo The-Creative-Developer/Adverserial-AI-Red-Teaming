@@ -229,12 +229,12 @@ class Session:
 # --------------------------------------------------------------------------
 
 
-def respond_vulnerable(question: str, docs: list[Doc]) -> Result:
+def respond_vulnerable(question: str, docs: list[Doc], planner=plan) -> Result:
     # Flaw 1: retrieval searches EVERYTHING, private store included.
     hits = retrieve(question, docs, k=1)
     # Flaw 2: attacker-controlled text (user AND document) steers the planner.
     steering = "\n".join([question] + [d.body for d in hits])
-    action = plan(steering)
+    action = planner(steering)
     # Flaw 3: the proposed action is executed with no authorization check.
     if action.tool == "read_private":
         secret_doc = next(d for d in docs if d.id == action.target)
@@ -318,17 +318,20 @@ MODES = ("vulnerable", "secure")
 
 
 def run_prompt(mode: str, prompt: str, docs: list[Doc], audit: AuditLog,
-               case: str = "-", session: Session | None = None) -> tuple[Verdict, Result]:
+               case: str = "-", session: Session | None = None,
+               planner=plan) -> tuple[Verdict, Result]:
     if mode == "vulnerable":
-        result = respond_vulnerable(prompt, docs)
+        result = respond_vulnerable(prompt, docs, planner)
     else:
-        result = respond_secure(prompt, docs, session or Session(), audit, case)
+        result = respond_secure(prompt, docs, session or Session(), audit, case,
+                                planner)
     return classify(result), result
 
 
-def run_matrix(docs: list[Doc], cases: list[Case], audit: AuditLog
-               ) -> dict[tuple[str, str], tuple[Verdict, Result]]:
-    return {(mode, c.key): run_prompt(mode, c.prompt, docs, audit, c.key)
+def run_matrix(docs: list[Doc], cases: list[Case], audit: AuditLog,
+               planner=plan) -> dict[tuple[str, str], tuple[Verdict, Result]]:
+    return {(mode, c.key): run_prompt(mode, c.prompt, docs, audit, c.key,
+                                      planner=planner)
             for mode in MODES for c in cases}
 
 
