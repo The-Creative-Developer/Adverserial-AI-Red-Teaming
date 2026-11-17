@@ -88,6 +88,18 @@ python demo/local_model_demo.py --model qwen2.5:3b --case C
 python demo/local_model_demo.py --mode vulnerable --audit
 ```
 
+**Type your own prompts** (good for Q&A and for audience suggestions):
+
+```bash
+python demo/local_model_demo.py --interactive
+```
+
+Each prompt runs through the vulnerable and the secure design side by side,
+showing what the model proposed and what the application did with it. Commands:
+`:mode vulnerable`, `:mode secure`, `:mode both`, `:audit`, `:quit`.
+To try your own poisoned document, add `--docs my_documents.txt` (same format
+as `demo/sample_documents.txt`).
+
 **LM Studio or llama.cpp server** (OpenAI-compatible API) instead of Ollama:
 
 ```bash
@@ -168,7 +180,7 @@ the sanitizer.
 | `demo/local_model_demo.py` | optional: same cases driven by a local model on localhost |
 | `demo/sample_documents.txt` | fictional FAQ, one poisoned note, one private entry |
 | `tests/test_assistant.py` | 20 tests, including a check that `assistant.py` imports no network modules |
-| `tests/test_local_model.py` | 9 tests for the local-model runner, using a fake server |
+| `tests/test_local_model.py` | 13 tests for the local-model runner, using a fake server |
 
 Run the tests with:
 
