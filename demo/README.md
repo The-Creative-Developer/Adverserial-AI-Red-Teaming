@@ -180,7 +180,6 @@ python -m unittest discover -s tests -v
 
 - All data is fictional. `ORBIT-741` is not a real credential.
 - `assistant.py` never opens a socket, calls an API, or touches real accounts. The optional `local_model_demo.py` only connects to a model on `localhost` and refuses any other host. Do not adapt either to connect to real accounts or services.
-  Do not adapt it to connect to real accounts or services.
 - Real red-teaming needs written scope, authorization, privacy rules and stop
   conditions (slide 17). Reports must never contain real secrets; `--report`
   masks even the fictional one.
